@@ -94,10 +94,19 @@ jobs:
       - name: Package artifacts
         run: |
           mkdir -p release
-          VERSION="${GITHUB_REF_NAME}"
+          # Strip leading 'v' from tag (v10.5.2 → 10.5.2)
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          # Map Rust target triples to release archive names
+          declare -A ARCH_MAP=(
+            ["x86_64-unknown-linux-musl"]="linux_amd64"
+            ["aarch64-unknown-linux-musl"]="linux_arm64"
+          )
+
           for dir in artifacts/*/; do
             TARGET=$(basename "$dir" | sed "s/${BIN_NAME}-//")
-            ARCHIVE="${BIN_NAME}_${VERSION}_${TARGET}.tar.gz"
+            SUFFIX="${ARCH_MAP[$TARGET]:-$TARGET}"
+            ARCHIVE="${BIN_NAME}_${VERSION}_${SUFFIX}.tar.gz"
             tar -czf "release/${ARCHIVE}" -C "$dir" "$BIN_NAME"
           done
           cd release && sha256sum *.tar.gz > checksums.txt
