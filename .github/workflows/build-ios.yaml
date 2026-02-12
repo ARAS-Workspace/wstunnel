@@ -1,0 +1,57 @@
+name: Build iOS Static Library
+
+on:
+  push:
+    branches: [ "ios/*" ]
+    paths:
+      - "wstunnel-ios/**"
+      - "wstunnel/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/build-ios.yaml"
+  workflow_dispatch:
+
+env:
+  RUST_VERSION: "1.93.0"
+  IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+
+jobs:
+  build:
+    name: Build wstunnel-ios (aarch64-apple-ios)
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-aarch64
+
+      - name: Build static library
+        run: |
+          export IPHONEOS_DEPLOYMENT_TARGET=${{ env.IPHONEOS_DEPLOYMENT_TARGET }}
+          cargo build --release --target aarch64-apple-ios -p wstunnel-ios
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifact/include
+          cp target/aarch64-apple-ios/release/libwstunnel_ios.a artifact/
+          cp wstunnel-ios/include/wstunnel_ios.h artifact/include/
+          cd artifact && shasum -a 256 libwstunnel_ios.a > CHECKSUM.sha256
+          echo "=== Build Info ==="
+          ls -lh libwstunnel_ios.a
+          cat CHECKSUM.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wstunnel-ios-aarch64-apple-ios
+          path: artifact/
+          retention-days: 90
