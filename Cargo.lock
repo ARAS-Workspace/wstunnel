@@ -4515,6 +4515,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wstunnel-ios"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "log",
+ "rustls-pki-types",
+ "tokio",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "url",
+ "wstunnel",
+]
+
+[[package]]
 name = "x509-parser"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

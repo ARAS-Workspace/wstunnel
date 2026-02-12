@@ -1,0 +1,20 @@
+[package]
+name = "wstunnel-ios"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "wstunnel_ios"
+crate-type = ["staticlib"]
+
+[dependencies]
+wstunnel = { path = "../wstunnel", default-features = false, features = ["ring"] }
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "net", "sync", "time", "signal"] }
+url = "2.5.8"
+anyhow = "1.0.100"
+log = "0.4.29"
+tracing = { version = "0.1.44", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-core = "0.1"
+rustls-pki-types = "1"
+base64 = "0.22"
