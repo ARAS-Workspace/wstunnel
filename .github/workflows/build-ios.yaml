@@ -1,7 +1,7 @@
 name: Build iOS Static Library
-
-on:
-  push:
+                                                                                                                                                                                       
+on:                                                                                                                                                                                  
+  push:                                                                                                                                                                              
     branches: [ "ios/*" ]
     paths:
       - "wstunnel-ios/**"
@@ -19,24 +19,30 @@ jobs:
   build:
     name: Build wstunnel-ios (aarch64-apple-ios)
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
           targets: aarch64-apple-ios
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
           key: ios-aarch64
 
       - name: Build static library
+        env:
+          DEPLOYMENT_TARGET: ${{ env.IPHONEOS_DEPLOYMENT_TARGET }}
         run: |
-          export IPHONEOS_DEPLOYMENT_TARGET=${{ env.IPHONEOS_DEPLOYMENT_TARGET }}
+          export IPHONEOS_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
           cargo build --release --target aarch64-apple-ios -p wstunnel-ios
 
       - name: Prepare artifact
@@ -50,7 +56,7 @@ jobs:
           cat CHECKSUM.sha256
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wstunnel-ios-aarch64-apple-ios
           path: artifact/
