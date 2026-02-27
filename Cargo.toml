@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 
-members = ["wstunnel", "wstunnel-cli", "wstunnel-ios", "wstunnel-mac"]
+members = ["wstunnel", "wstunnel-cli", "wstunnel-ios", "wstunnel-mac", "wstunnel-bridge-linux"]
 
 [workspace.dependencies]
 

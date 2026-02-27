@@ -1,0 +1,124 @@
+name: Package wstunnel-bridge Release
+
+on:
+  push:
+    tags:
+      - "wstunnel-bridge-release-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-amd64:
+    name: Build x86_64
+    runs-on: ubuntu-latest
+    env:
+      RUST_VERSION: "1.93.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: release-linux-amd64
+
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu -p wstunnel-bridge-linux
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#wstunnel-bridge-release-}"
+          DIR="wstunnel-bridge-${VERSION}-linux-amd64"
+          mkdir -p "${DIR}/wstunnel_bridge"
+          cp target/x86_64-unknown-linux-gnu/release/libwstunnel_bridge_linux.so "${DIR}/"
+          cd "${DIR}" && sha256sum libwstunnel_bridge_linux.so > libwstunnel_bridge_linux.so.sha256 && cd ..
+          cp wstunnel_bridge/__init__.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/_ffi.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/client.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/types.py "${DIR}/wstunnel_bridge/"
+          zip -r "${DIR}.zip" "${DIR}/"
+          echo "ASSET_PATH=${DIR}.zip" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=${DIR}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-amd64
+          path: ${{ env.ASSET_PATH }}
+
+  build-arm64:
+    name: Build aarch64
+    runs-on: ubuntu-24.04-arm
+    env:
+      RUST_VERSION: "1.93.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: release-linux-arm64
+
+      - name: Build
+        run: cargo build --release --target aarch64-unknown-linux-gnu -p wstunnel-bridge-linux
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#wstunnel-bridge-release-}"
+          DIR="wstunnel-bridge-${VERSION}-linux-arm64"
+          mkdir -p "${DIR}/wstunnel_bridge"
+          cp target/aarch64-unknown-linux-gnu/release/libwstunnel_bridge_linux.so "${DIR}/"
+          cd "${DIR}" && sha256sum libwstunnel_bridge_linux.so > libwstunnel_bridge_linux.so.sha256 && cd ..
+          cp wstunnel_bridge/__init__.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/_ffi.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/client.py "${DIR}/wstunnel_bridge/"
+          cp wstunnel_bridge/types.py "${DIR}/wstunnel_bridge/"
+          zip -r "${DIR}.zip" "${DIR}/"
+          echo "ASSET_PATH=${DIR}.zip" >> "$GITHUB_ENV"
+          echo "ASSET_NAME=${DIR}.zip" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-arm64
+          path: ${{ env.ASSET_PATH }}
+
+  release:
+    name: Create Release
+    needs: [build-amd64, build-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: packages/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#wstunnel-bridge-release-}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${{ github.repository }}" \
+            --title "wstunnel-bridge ${VERSION}" \
+            --generate-notes \
+            packages/package-amd64/*.zip \
+            packages/package-arm64/*.zip
