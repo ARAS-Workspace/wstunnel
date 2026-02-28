@@ -47,7 +47,7 @@ jobs:
           mkdir -p artifact/include artifact/wstunnel_bridge
           cp target/x86_64-unknown-linux-gnu/release/libwstunnel_bridge_linux.so artifact/
           cp wstunnel-bridge-linux/include/wstunnel_bridge_linux.h artifact/include/
-          cp wstunnel_bridge/__init__.py wstunnel_bridge/_ffi.py wstunnel_bridge/client.py wstunnel_bridge/types.py artifact/wstunnel_bridge/
+          cp wstunnel_bridge/__init__.py wstunnel_bridge/_ffi.py wstunnel_bridge/client.py wstunnel_bridge/server.py wstunnel_bridge/types.py artifact/wstunnel_bridge/
           cd artifact && sha256sum libwstunnel_bridge_linux.so > CHECKSUM.sha256
           echo "=== Build Info ==="
           ls -lh libwstunnel_bridge_linux.so
@@ -88,7 +88,7 @@ jobs:
           mkdir -p artifact/include artifact/wstunnel_bridge
           cp target/aarch64-unknown-linux-gnu/release/libwstunnel_bridge_linux.so artifact/
           cp wstunnel-bridge-linux/include/wstunnel_bridge_linux.h artifact/include/
-          cp wstunnel_bridge/__init__.py wstunnel_bridge/_ffi.py wstunnel_bridge/client.py wstunnel_bridge/types.py artifact/wstunnel_bridge/
+          cp wstunnel_bridge/__init__.py wstunnel_bridge/_ffi.py wstunnel_bridge/client.py wstunnel_bridge/server.py wstunnel_bridge/types.py artifact/wstunnel_bridge/
           cd artifact && sha256sum libwstunnel_bridge_linux.so > CHECKSUM.sha256
           echo "=== Build Info ==="
           ls -lh libwstunnel_bridge_linux.so

@@ -1,19 +1,28 @@
 // wstunnel-bridge-linux: C FFI wrapper for wstunnel (Linux)
 //
-// Wraps wstunnel identically to wstunnel-cli: constructs the same Client
-// config struct and calls run_client() with a JoinSetTokioExecutor.
+// Wraps wstunnel identically to wstunnel-cli: constructs the same Client/Server
+// config structs and calls run_client()/run_server() with a JoinSetTokioExecutor.
 //
-// Usage:
+// Client usage:
 //   1. (Optional) Set a log callback with wstunnel_set_log_callback()
 //   2. Initialize logging with wstunnel_init_logging()
 //   3. Create a config with wstunnel_config_new()
 //   4. Set remote URL, tunnels, and options
 //   5. Start with wstunnel_client_start(config)
 //   6. Stop with wstunnel_client_stop()
+//
+// Server usage:
+//   1. (Optional) Set a log callback with wstunnel_set_log_callback()
+//   2. Initialize logging with wstunnel_init_logging()
+//   3. Create a config with wstunnel_server_config_new()
+//   4. Set bind URL, TLS, restrictions, and options
+//   5. Start with wstunnel_server_start(config)
+//   6. Stop with wstunnel_server_stop()
 
 use std::ffi::{CStr, CString};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::raw::c_char;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -32,7 +41,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 // Import types from wstunnel — exactly the same types the CLI uses
-use wstunnel::config::{Client, HeaderName, HeaderValue, LocalToRemote};
+use wstunnel::config::{Client, Server, HeaderName, HeaderValue, LocalToRemote};
 use wstunnel::executor::JoinSetTokioExecutor;
 use wstunnel::tunnel::LocalProtocol;
 
@@ -59,9 +68,16 @@ pub const WS_LOG_TRACE: i32 = 4;
 // ═══════════════════════════════════════════════════════════════
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+// Client state
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static STOP_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
+
+// Server state (independent of client — both can run simultaneously)
+static SERVER_RUNNING: AtomicBool = AtomicBool::new(false);
+static SERVER_STOP_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
+static SERVER_LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
 /// Log callback: (level, message, user_context)
 type LogCallbackFn = unsafe extern "C" fn(i32, *const c_char, *mut std::ffi::c_void);
@@ -141,6 +157,33 @@ enum TunnelRule {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Server Config Builder (FFI-friendly, converts to Server at start time)
+// ═══════════════════════════════════════════════════════════════
+
+/// Opaque server config handle for C API.
+/// Mirrors wstunnel::config::Server fields using C-compatible types.
+pub struct WstunnelServerConfig {
+    // Required
+    bind_url: Option<String>,                        // ws[s]://0.0.0.0:port
+
+    // TLS
+    tls_certificate: Option<String>,                 // PEM file path
+    tls_private_key: Option<String>,                 // PEM file path
+    tls_client_ca_certs: Option<String>,             // PEM file path (mTLS)
+
+    // Restrictions
+    restrict_to: Vec<String>,                        // "host:port" entries
+    restrict_http_upgrade_path_prefix: Vec<String>,  // path prefix entries
+
+    // WebSocket
+    websocket_ping_frequency_secs: Option<u32>,      // None = use default 30s
+    websocket_mask_frame: bool,
+
+    // Runtime
+    worker_threads: usize,
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Helpers
 // ═══════════════════════════════════════════════════════════════
 
@@ -153,6 +196,13 @@ unsafe fn cstr_to_string(ptr: *const c_char) -> Option<String> {
 
 fn set_last_error(msg: &str) {
     if let Ok(mut guard) = LAST_ERROR.lock() {
+        *guard = CString::new(msg).ok();
+    }
+    emit_log(WS_LOG_ERROR, msg);
+}
+
+fn set_server_last_error(msg: &str) {
+    if let Ok(mut guard) = SERVER_LAST_ERROR.lock() {
         *guard = CString::new(msg).ok();
     }
     emit_log(WS_LOG_ERROR, msg);
@@ -300,6 +350,51 @@ fn build_client_config(config: &WstunnelConfig) -> Result<Client, String> {
         tls_private_key: None,
         dns_resolver: vec![],
         dns_resolver_prefer_ipv4: false,
+    })
+}
+
+/// Convert FFI server config into the exact same Server struct that wstunnel-cli builds
+fn build_server_config(config: &WstunnelServerConfig) -> Result<Server, String> {
+    let bind_url = config.bind_url.as_ref()
+        .ok_or("Bind URL not set")?;
+    let remote_addr = Url::parse(bind_url)
+        .map_err(|e| format!("Invalid bind URL: {}", e))?;
+
+    let websocket_ping_frequency = match config.websocket_ping_frequency_secs {
+        Some(0) => None,
+        Some(s) => Some(Duration::from_secs(s as u64)),
+        None => Some(Duration::from_secs(30)),
+    };
+
+    let restrict_to = if config.restrict_to.is_empty() {
+        None
+    } else {
+        Some(config.restrict_to.clone())
+    };
+
+    let restrict_http_upgrade_path_prefix = if config.restrict_http_upgrade_path_prefix.is_empty() {
+        None
+    } else {
+        Some(config.restrict_http_upgrade_path_prefix.clone())
+    };
+
+    Ok(Server {
+        remote_addr,
+        socket_so_mark: None,
+        websocket_ping_frequency,
+        websocket_mask_frame: config.websocket_mask_frame,
+        dns_resolver: vec![],
+        dns_resolver_prefer_ipv4: false,
+        restrict_to,
+        restrict_http_upgrade_path_prefix,
+        restrict_config: None,
+        tls_certificate: config.tls_certificate.as_ref().map(PathBuf::from),
+        tls_private_key: config.tls_private_key.as_ref().map(PathBuf::from),
+        tls_client_ca_certs: config.tls_client_ca_certs.as_ref().map(PathBuf::from),
+        http_proxy: None,
+        http_proxy_login: None,
+        http_proxy_password: None,
+        remote_to_local_server_idle_timeout: Duration::from_secs(180),
     })
 }
 
@@ -888,4 +983,306 @@ pub extern "C" fn wstunnel_client_get_last_error() -> *const c_char {
 pub extern "C" fn wstunnel_get_version() -> *const c_char {
     // Match the actual wstunnel crate version
     c"10.5.2".as_ptr()
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Public FFI: Server Config Builder
+// ═══════════════════════════════════════════════════════════════
+
+/// Create a new server config builder. Must be freed with wstunnel_server_config_free().
+/// Defaults match wstunnel-cli server defaults.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_new() -> *mut WstunnelServerConfig {
+    let config = Box::new(WstunnelServerConfig {
+        bind_url: None,
+        tls_certificate: None,
+        tls_private_key: None,
+        tls_client_ca_certs: None,
+        restrict_to: Vec::new(),
+        restrict_http_upgrade_path_prefix: Vec::new(),
+        websocket_ping_frequency_secs: None,
+        websocket_mask_frame: false,
+        worker_threads: 2,
+    });
+    Box::into_raw(config)
+}
+
+/// Free a server config builder.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_free(config: *mut WstunnelServerConfig) {
+    if !config.is_null() {
+        unsafe { drop(Box::from_raw(config)) };
+    }
+}
+
+/// Set the server bind URL (e.g. "wss://0.0.0.0:8443" or "ws://0.0.0.0:8080").
+/// Scheme determines TLS: wss:// = TLS enabled, ws:// = plaintext.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_bind_url(
+    config: *mut WstunnelServerConfig,
+    url: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(url) } {
+        Some(s) => { config.bind_url = Some(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Set TLS certificate PEM file path. Required for wss:// with custom certs.
+/// If not set with wss://, wstunnel uses an embedded self-signed certificate.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_tls_certificate(
+    config: *mut WstunnelServerConfig,
+    path: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(path) } {
+        Some(s) => { config.tls_certificate = Some(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Set TLS private key PEM file path.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_tls_private_key(
+    config: *mut WstunnelServerConfig,
+    path: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(path) } {
+        Some(s) => { config.tls_private_key = Some(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Set TLS client CA certificates PEM file path for mutual TLS (mTLS).
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_tls_client_ca_certs(
+    config: *mut WstunnelServerConfig,
+    path: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(path) } {
+        Some(s) => { config.tls_client_ca_certs = Some(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Add a restriction rule: only allow tunnels to this destination.
+/// Format: "host:port" (e.g. "127.0.0.1:9999")
+/// Equivalent to CLI: --restrict-to host:port
+/// Can be called multiple times to allow multiple destinations.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_add_restrict_to(
+    config: *mut WstunnelServerConfig,
+    target: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(target) } {
+        Some(s) => { config.restrict_to.push(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Add an HTTP upgrade path prefix restriction.
+/// Only clients using this prefix will be accepted.
+/// Equivalent to CLI: -r prefix
+/// Can be called multiple times to allow multiple prefixes.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_add_restrict_path_prefix(
+    config: *mut WstunnelServerConfig,
+    prefix: *const c_char,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    match unsafe { cstr_to_string(prefix) } {
+        Some(s) => { config.restrict_http_upgrade_path_prefix.push(s); WS_OK }
+        None => WS_ERR_INVALID_PARAM,
+    }
+}
+
+/// Set WebSocket ping frequency in seconds (default: 30, 0 to disable).
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_websocket_ping_frequency(
+    config: *mut WstunnelServerConfig,
+    secs: u32,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    config.websocket_ping_frequency_secs = Some(secs);
+    WS_OK
+}
+
+/// Enable WebSocket frame masking (default: false).
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_websocket_mask_frame(
+    config: *mut WstunnelServerConfig,
+    mask: bool,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    config.websocket_mask_frame = mask;
+    WS_OK
+}
+
+/// Set the number of Tokio worker threads (default: 2).
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_config_set_worker_threads(
+    config: *mut WstunnelServerConfig,
+    threads: u32,
+) -> i32 {
+    let config = match unsafe { config.as_mut() } {
+        Some(c) => c,
+        None => return WS_ERR_CONFIG_NULL,
+    };
+    config.worker_threads = threads as usize;
+    WS_OK
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Public FFI: Server Control
+// ═══════════════════════════════════════════════════════════════
+
+/// Start the wstunnel server with the given config.
+/// Internally builds a wstunnel::config::Server and calls wstunnel::run_server()
+/// exactly as wstunnel-cli does.
+///
+/// The config is NOT consumed — call wstunnel_server_config_free() after start.
+/// Returns: WS_OK on success, negative error code on failure.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_start(config: *mut WstunnelServerConfig) -> i32 {
+    if SERVER_RUNNING.load(Ordering::SeqCst) {
+        set_server_last_error("Server is already running");
+        return WS_ERR_ALREADY_RUNNING;
+    }
+
+    let config = match unsafe { config.as_ref() } {
+        Some(c) => c,
+        None => {
+            set_server_last_error("Config is null");
+            return WS_ERR_CONFIG_NULL;
+        }
+    };
+
+    let server_config = match build_server_config(config) {
+        Ok(c) => c,
+        Err(e) => {
+            set_server_last_error(&e);
+            return WS_ERR_INVALID_PARAM;
+        }
+    };
+
+    let runtime = match get_or_init_runtime(config.worker_threads) {
+        Some(rt) => rt,
+        None => {
+            set_server_last_error("Failed to create Tokio runtime");
+            return WS_ERR_RUNTIME;
+        }
+    };
+
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = SERVER_STOP_TX.lock().unwrap();
+        *guard = Some(stop_tx);
+    }
+
+    let bind_url_str = config.bind_url.as_deref().unwrap_or("unknown").to_string();
+    SERVER_RUNNING.store(true, Ordering::SeqCst);
+    emit_log(WS_LOG_INFO, &format!("Starting wstunnel server on {}", bind_url_str));
+
+    runtime.spawn(async move {
+        let executor = JoinSetTokioExecutor::default();
+
+        tokio::select! {
+            result = wstunnel::run_server(server_config, executor) => {
+                match result {
+                    Ok(()) => emit_log(WS_LOG_INFO, "wstunnel server exited normally"),
+                    Err(e) => {
+                        let msg = format!("wstunnel server error: {:?}", e);
+                        emit_log(WS_LOG_ERROR, &msg);
+                        if let Ok(mut guard) = SERVER_LAST_ERROR.lock() {
+                            *guard = CString::new(msg).ok();
+                        }
+                    }
+                }
+            }
+            _ = stop_rx => {
+                emit_log(WS_LOG_INFO, "wstunnel server stopped by request");
+            }
+        }
+
+        SERVER_RUNNING.store(false, Ordering::SeqCst);
+    });
+
+    WS_OK
+}
+
+/// Stop the running wstunnel server.
+///
+/// Returns: WS_OK on success, WS_ERR_NOT_RUNNING if not active.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_stop() -> i32 {
+    if !SERVER_RUNNING.load(Ordering::SeqCst) {
+        return WS_ERR_NOT_RUNNING;
+    }
+
+    let tx = {
+        let mut guard = SERVER_STOP_TX.lock().unwrap();
+        guard.take()
+    };
+
+    match tx {
+        Some(sender) => {
+            let _ = sender.send(());
+            std::thread::sleep(Duration::from_millis(100));
+            SERVER_RUNNING.store(false, Ordering::SeqCst);
+            emit_log(WS_LOG_INFO, "wstunnel server stop requested");
+            WS_OK
+        }
+        None => WS_ERR_NOT_RUNNING,
+    }
+}
+
+/// Check if the wstunnel server is running.
+///
+/// Returns: 1 if running, 0 if not.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_is_running() -> i32 {
+    if SERVER_RUNNING.load(Ordering::SeqCst) { 1 } else { 0 }
+}
+
+/// Get the last server error message, or NULL if no error.
+///
+/// The returned pointer is valid until the next error occurs.
+#[unsafe(no_mangle)]
+pub extern "C" fn wstunnel_server_get_last_error() -> *const c_char {
+    match SERVER_LAST_ERROR.lock() {
+        Ok(guard) => match &*guard {
+            Some(cstr) => cstr.as_ptr(),
+            None => std::ptr::null(),
+        },
+        Err(_) => std::ptr::null(),
+    }
 }
