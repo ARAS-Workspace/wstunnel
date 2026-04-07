@@ -1,7 +1,7 @@
-name: Build iOS Static Library
-                                                                                                                                                                                       
-on:                                                                                                                                                                                  
-  push:                                                                                                                                                                              
+name: Build iOS XCFramework
+
+on:
+  push:
     branches: [ "ios/*" ]
     paths:
       - "wstunnel-ios/**"
@@ -17,7 +17,7 @@ env:
 
 jobs:
   build:
-    name: Build wstunnel-ios (aarch64-apple-ios)
+    name: Build WstunnelKit.xcframework
     runs-on: macos-15
     permissions:
       contents: read
@@ -31,33 +31,43 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-ios
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          key: ios-aarch64
+          key: ios-xcframework
 
-      - name: Build static library
-        env:
-          DEPLOYMENT_TARGET: ${{ env.IPHONEOS_DEPLOYMENT_TARGET }}
+      - name: Build device (aarch64-apple-ios)
         run: |
-          export IPHONEOS_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+          export IPHONEOS_DEPLOYMENT_TARGET="${{ env.IPHONEOS_DEPLOYMENT_TARGET }}"
           cargo build --release --target aarch64-apple-ios -p wstunnel-ios
 
-      - name: Prepare artifact
+      - name: Build simulator (aarch64-apple-ios-sim)
         run: |
-          mkdir -p artifact/include
-          cp target/aarch64-apple-ios/release/libwstunnel_ios.a artifact/
-          cp wstunnel-ios/include/wstunnel_ios.h artifact/include/
-          cd artifact && shasum -a 256 libwstunnel_ios.a > CHECKSUM.sha256
-          echo "=== Build Info ==="
-          ls -lh libwstunnel_ios.a
+          export IPHONEOS_DEPLOYMENT_TARGET="${{ env.IPHONEOS_DEPLOYMENT_TARGET }}"
+          cargo build --release --target aarch64-apple-ios-sim -p wstunnel-ios
+
+      - name: Create XCFramework
+        run: |
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libwstunnel_ios.a \
+            -headers wstunnel-ios/include/ \
+            -library target/aarch64-apple-ios-sim/release/libwstunnel_ios.a \
+            -headers wstunnel-ios/include/ \
+            -output WstunnelKit.xcframework
+
+          echo "=== XCFramework Info ==="
+          ls -lhR WstunnelKit.xcframework/
+          shasum -a 256 WstunnelKit.xcframework/ios-arm64/libwstunnel_ios.a > CHECKSUM.sha256
+          shasum -a 256 WstunnelKit.xcframework/ios-arm64-simulator/libwstunnel_ios.a >> CHECKSUM.sha256
           cat CHECKSUM.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wstunnel-ios-aarch64-apple-ios
-          path: artifact/
+          name: WstunnelKit-xcframework
+          path: |
+            WstunnelKit.xcframework/
+            CHECKSUM.sha256
           retention-days: 90
