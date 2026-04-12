@@ -1,0 +1,159 @@
+name: Release Linux
+
+# Manual-dispatch workflow that builds the linux/amd64 + linux/arm64
+# binaries and ships them as `wstunnel_<version>_linux_<arch>.tar.gz`
+# tarballs attached to a GitHub release. Lives next to the upstream
+# `release.yaml` (which only handles the build sanity check on every
+# push/PR/tag) so the upstream-tracking workflow stays untouched.
+#
+# The version is read from `wstunnel/Cargo.toml`, so the source of
+# truth is always the developer's `Bump version vX.Y.Z` commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create / update the GitHub release with the built archives"
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  RUST_VERSION: 1.93.0
+  BIN_NAME: "wstunnel"
+
+jobs:
+  build:
+    name: Build linux/${{ matrix.platform.archive_arch }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - target: x86_64-unknown-linux-musl
+            archive_arch: amd64
+          - target: aarch64-unknown-linux-musl
+            archive_arch: arm64
+
+    steps:
+      - name: Install package for linux
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Checkout Git repo
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+        with:
+          # `gh release create` below uses an explicit GH_TOKEN, no
+          # need to leave the runner's GITHUB_TOKEN inside .git/config.
+          persist-credentials: false
+
+      - name: Install rust toolchain for Linux
+        uses: actions-rs/toolchain@16499b5e05bf2e26879000db0c1d13f7e13fa3af # v1
+        with:
+          profile: minimal
+          toolchain: "${{ env.RUST_VERSION }}"
+          override: true
+          target: ${{ matrix.platform.target }}
+          components: rustfmt, clippy
+
+      - name: Build linux/${{ matrix.platform.archive_arch }} binary
+        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
+        env:
+          JEMALLOC_SYS_WITH_LG_PAGE: ${{ contains(matrix.platform.target, 'aarch64') && '14' || '12' }}
+        # cross-rs is used for non-x86_64 targets so jemalloc compiles
+        # against the toolchain image rather than the host gcc.
+        with:
+          command: build
+          use-cross: ${{ !contains(matrix.platform.target, 'x86_64') }}
+          args: --release --features=jemalloc --bin wstunnel --target ${{ matrix.platform.target }}
+
+      - name: Store artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.BIN_NAME }}-${{ matrix.platform.target }}
+          path: target/${{ matrix.platform.target }}/release/${{ env.BIN_NAME }}
+          retention-days: 1
+          if-no-files-found: error
+
+  release:
+    name: Package + GitHub release
+    needs: [ build ]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Git repo
+        uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744 # v3
+        with:
+          persist-credentials: false
+
+      - name: Read version from Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(awk -F\" '/^version *= */ {print $2; exit}' wstunnel/Cargo.toml)
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: could not parse version from wstunnel/Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${VERSION}"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@65a9edc5881444af0b9093a5e628f2fe47ea3b2e # v4.1.7
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts/ -type f
+
+      # Package the linux/amd64 + linux/arm64 binaries into the
+      # tarballs the downstream consumers expect
+      # (`wstunnel_<version>_linux_<arch>.tar.gz`).
+      - name: Package archives
+        env:
+          # Bind the templated value to a shell env var so the run
+          # block never expands ${{ ... }} inline.
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          declare -A ARCH=(
+            [x86_64-unknown-linux-musl]=amd64
+            [aarch64-unknown-linux-musl]=arm64
+          )
+          for target in "${!ARCH[@]}"; do
+            arch="${ARCH[$target]}"
+            dir="artifacts/${BIN_NAME}-${target}"
+            archive="${BIN_NAME}_${VERSION}_linux_${arch}.tar.gz"
+            chmod +x "${dir}/${BIN_NAME}"
+            tar -czf "release/${archive}" -C "${dir}" "${BIN_NAME}"
+            echo "packaged: ${archive}"
+          done
+          (cd release && sha256sum *.tar.gz > checksums.txt)
+          ls -lh release/
+          cat release/checksums.txt
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release ${TAG} exists — uploading archives with --clobber"
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            echo "Creating new release ${TAG}"
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "wstunnel ${TAG}" \
+              --notes "Linux amd64 + arm64 builds for downstream consumers."
+          fi
