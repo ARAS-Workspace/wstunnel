@@ -1,8 +1,8 @@
-name: Build macOS Static Library                                                                                                                                                       
- 
-on:                                                                                                                                                                                    
-  push:                                                                                                                                                                              
-    branches: [ "mac/*" ]                                                                                                                                                            
+name: Build macOS Static Library
+
+on:
+  push:
+    branches: [ "mac/*" ]
     paths:
       - "wstunnel-mac/**"
       - "wstunnel/Cargo.toml"
@@ -17,7 +17,7 @@ env:
 
 jobs:
   build:
-    name: Build wstunnel-mac (aarch64-apple-darwin)
+    name: Build wstunnel-mac (universal)
     runs-on: macos-15
     permissions:
       contents: read
@@ -31,34 +31,43 @@ jobs:
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
-          targets: aarch64-apple-darwin
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
 
       - name: Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
         with:
-          key: mac-aarch64
+          key: mac-universal
 
-      - name: Build static library
-        env:
-          DEPLOYMENT_TARGET: ${{ env.MACOSX_DEPLOYMENT_TARGET }}
+      - name: Build arm64
         run: |
-          export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
           cargo build --release --target aarch64-apple-darwin -p wstunnel-mac
+
+      - name: Build x86_64
+        run: |
+          cargo build --release --target x86_64-apple-darwin -p wstunnel-mac
+
+      - name: Create universal binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/libwstunnel_mac.a \
+            target/x86_64-apple-darwin/release/libwstunnel_mac.a \
+            -output libwstunnel_mac.a
+
+          echo "=== Universal binary ==="
+          lipo -info libwstunnel_mac.a
+          ls -lh libwstunnel_mac.a
 
       - name: Prepare artifact
         run: |
           mkdir -p artifact/include
-          cp target/aarch64-apple-darwin/release/libwstunnel_mac.a artifact/
+          mv libwstunnel_mac.a artifact/
           cp wstunnel-mac/include/wstunnel_mac.h artifact/include/
           cd artifact && shasum -a 256 libwstunnel_mac.a > CHECKSUM.sha256
-          echo "=== Build Info ==="
-          ls -lh libwstunnel_mac.a
           cat CHECKSUM.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wstunnel-mac-aarch64-apple-darwin
+          name: wstunnel-mac-universal
           path: artifact/
           retention-days: 90
-
