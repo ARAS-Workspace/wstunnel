@@ -1,0 +1,105 @@
+name: Release iOS
+
+# Tag-triggered release of the iOS XCFramework.
+# Triggered by `.github/scripts/release-ios.sh`, which reads the
+# version from wstunnel/Cargo.toml and pushes an `ios-v<version>` tag.
+
+on:
+  push:
+    tags: [ "ios-v*" ]
+
+env:
+  RUST_VERSION: "1.93.0"
+  IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+  LIB_NAME: "libwstunnel_apple.a"
+  FRAMEWORK: "WstunnelKit.xcframework"
+
+jobs:
+  release:
+    name: Build XCFramework + publish release
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve version from tag and verify it matches Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#ios-v}"
+          MANIFEST=$(awk -F\" '/^version *= */ {print $2; exit}' wstunnel/Cargo.toml)
+          if [ "$VERSION" != "$MANIFEST" ]; then
+            echo "ERROR: tag says '${VERSION}', wstunnel/Cargo.toml says '${MANIFEST}'" >&2
+            exit 1
+          fi
+          CRATE=$(awk -F\" '/^version *= */ {print $2; exit}' wstunnel-apple/Cargo.toml)
+          if [ "$VERSION" != "$CRATE" ]; then
+            echo "ERROR: tag says '${VERSION}', wstunnel-apple/Cargo.toml says '${CRATE}'" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: apple-ios-xcframework
+
+      - name: Build device
+        run: cargo build --release --locked --target aarch64-apple-ios -p wstunnel-apple
+
+      - name: Build simulator
+        run: cargo build --release --locked --target aarch64-apple-ios-sim -p wstunnel-apple
+
+      - name: Create XCFramework
+        run: |
+          set -euo pipefail
+          xcodebuild -create-xcframework \
+            -library "target/aarch64-apple-ios/release/${LIB_NAME}" \
+            -headers wstunnel-apple/include/ \
+            -library "target/aarch64-apple-ios-sim/release/${LIB_NAME}" \
+            -headers wstunnel-apple/include/ \
+            -output "${FRAMEWORK}"
+          ls -lR "${FRAMEWORK}"
+
+      - name: Package archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          shasum -a 256 \
+            "${FRAMEWORK}/ios-arm64/${LIB_NAME}" \
+            "${FRAMEWORK}/ios-arm64-simulator/${LIB_NAME}" \
+            > "${FRAMEWORK}/CHECKSUM.sha256"
+          zip -qry "release/wstunnel-apple_${VERSION}_ios_xcframework.zip" "${FRAMEWORK}"
+          (cd release && shasum -a 256 ./*.zip > checksums.txt)
+          ls -lh release/
+          cat release/checksums.txt
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "wstunnel-apple iOS ${VERSION}" \
+              --notes "iOS XCFramework (device arm64 + simulator arm64)."
+          fi

@@ -1,0 +1,102 @@
+name: Release macOS
+
+# Tag-triggered release of the universal macOS static library.
+# Triggered by `.github/scripts/release-mac.sh`, which reads the
+# version from wstunnel/Cargo.toml and pushes a `mac-v<version>` tag.
+
+on:
+  push:
+    tags: [ "mac-v*" ]
+
+env:
+  RUST_VERSION: "1.93.0"
+  MACOSX_DEPLOYMENT_TARGET: "14.0"
+  LIB_NAME: "libwstunnel_apple.a"
+  HEADER: "wstunnel_apple.h"
+
+jobs:
+  release:
+    name: Build universal + publish release
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve version from tag and verify it matches Cargo.toml
+        id: version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#mac-v}"
+          MANIFEST=$(awk -F\" '/^version *= */ {print $2; exit}' wstunnel/Cargo.toml)
+          if [ "$VERSION" != "$MANIFEST" ]; then
+            echo "ERROR: tag says '${VERSION}', wstunnel/Cargo.toml says '${MANIFEST}'" >&2
+            exit 1
+          fi
+          CRATE=$(awk -F\" '/^version *= */ {print $2; exit}' wstunnel-apple/Cargo.toml)
+          if [ "$VERSION" != "$CRATE" ]; then
+            echo "ERROR: tag says '${VERSION}', wstunnel-apple/Cargo.toml says '${CRATE}'" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          key: apple-macos-universal
+
+      - name: Build arm64
+        run: cargo build --release --locked --target aarch64-apple-darwin -p wstunnel-apple
+
+      - name: Build x86_64
+        run: cargo build --release --locked --target x86_64-apple-darwin -p wstunnel-apple
+
+      - name: Create universal binary
+        run: |
+          set -euo pipefail
+          lipo -create \
+            "target/aarch64-apple-darwin/release/${LIB_NAME}" \
+            "target/x86_64-apple-darwin/release/${LIB_NAME}" \
+            -output "${LIB_NAME}"
+          lipo -info "${LIB_NAME}"
+
+      - name: Package archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p stage/include release
+          mv "${LIB_NAME}" stage/
+          cp "wstunnel-apple/include/${HEADER}" stage/include/
+          (cd stage && shasum -a 256 "${LIB_NAME}" > CHECKSUM.sha256)
+          tar -czf "release/wstunnel-apple_${VERSION}_macos_universal.tar.gz" -C stage .
+          (cd release && shasum -a 256 ./*.tar.gz > checksums.txt)
+          ls -lh release/
+          cat release/checksums.txt
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "wstunnel-apple macOS ${VERSION}" \
+              --notes "Universal (arm64 + x86_64) macOS static library and C header."
+          fi
