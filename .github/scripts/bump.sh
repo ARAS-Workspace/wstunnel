@@ -5,6 +5,8 @@
 #
 # The scheme is <upstream-version>+Phantom.Patch.<n>: the upstream base
 # stays, the counter records how many patch rounds we applied.
+# Rewrites the manifests and commits them as `Bump version <new>`,
+# leaving only the push to the operator.
 # Usage:
 #   .github/scripts/bump.sh                  10.5.2 → 10.5.2+Phantom.Patch.1
 #                                            …Patch.1 → …Patch.2
@@ -14,6 +16,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROOT_MANIFEST="${REPO_ROOT}/Cargo.toml"
+
+# The commit below stages explicit paths, but a dirty tree still means
+# the operator has work in flight that a version commit would sit on
+# top of unreviewed.
+if ! git -C "${REPO_ROOT}" diff --quiet || ! git -C "${REPO_ROOT}" diff --cached --quiet; then
+    echo "ERROR: working tree has uncommitted changes — commit or stash them first" >&2
+    git -C "${REPO_ROOT}" status --short >&2
+    exit 1
+fi
 
 read_version() {
     awk -F\" '/^version *= */ {print $2; exit}' "$1"
@@ -102,10 +113,14 @@ if [[ "$CHANGED" -ne "${#MANIFESTS[@]}" ]]; then
     exit 1
 fi
 
+git -C "${REPO_ROOT}" commit --quiet --only -m "Bump version ${NEW}" -- "${MANIFESTS[@]}"
+
 echo "${CURRENT} → ${NEW}  (${CHANGED} of ${#MEMBERS[@]} members)"
 for m in "${MANIFESTS[@]}"; do
     echo "  ${m#"${REPO_ROOT}/"}"
 done
+echo
+git -C "${REPO_ROOT}" log -1 --format="committed %h %s"
 if [[ "${#SKIPPED[@]}" -gt 0 ]]; then
     for s in "${SKIPPED[@]}"; do
         echo "  skipped (no literal version): ${s}"
