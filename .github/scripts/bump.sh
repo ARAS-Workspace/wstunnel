@@ -113,7 +113,30 @@ if [[ "$CHANGED" -ne "${#MANIFESTS[@]}" ]]; then
     exit 1
 fi
 
-git -C "${REPO_ROOT}" commit --quiet --only -m "Bump version ${NEW}" -- "${MANIFESTS[@]}"
+# Cargo.lock records the workspace members' own versions, so it goes
+# stale the moment a manifest moves and `cargo build --locked` in CI
+# refuses the build. --offline keeps this to the member entries.
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "ERROR: cargo not found — cannot sync Cargo.lock" >&2
+    exit 1
+fi
+cargo update --workspace --offline --manifest-path "${ROOT_MANIFEST}" >/dev/null
+
+LOCKED_OK=0
+for m in "${MEMBERS[@]}"; do
+    if awk -v n="$m" -v v="$NEW" '
+        $0 == "name = \"" n "\"" { getline; if ($0 == "version = \"" v "\"") { found = 1 } }
+        END { exit found ? 0 : 1 }
+    ' "${REPO_ROOT}/Cargo.lock"; then
+        LOCKED_OK=$(( LOCKED_OK + 1 ))
+    fi
+done
+if [[ "$LOCKED_OK" -ne "${#MANIFESTS[@]}" ]]; then
+    echo "ERROR: Cargo.lock carries ${LOCKED_OK}/${#MANIFESTS[@]} members at ${NEW}" >&2
+    exit 1
+fi
+
+git -C "${REPO_ROOT}" commit --quiet --only -m "Bump version ${NEW}" -- "${MANIFESTS[@]}" "${REPO_ROOT}/Cargo.lock"
 
 echo "${CURRENT} → ${NEW}  (${CHANGED} of ${#MEMBERS[@]} members)"
 for m in "${MANIFESTS[@]}"; do
