@@ -1,6 +1,6 @@
 [package]
 name = "wstunnel-apple"
-version = "10.5.2"
+version = "10.5.2+Phantom.Patch.1"
 edition = "2024"
 
 [lib]
